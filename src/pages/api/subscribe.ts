@@ -1,16 +1,52 @@
 import { NextApiRequest, NextApiResponse } from "next";
 import { getSession } from 'next-auth/react'
 import { stripe } from "../../services/stripe";
+import { query as q } from 'faunadb';
+import { fauna } from "../../services/fauna";
 
-export default async (request: NextApiRequest, response: NextApiResponse) => {
+type userFaunaDb = {
+  ref: {
+    id: string;
+  }
+  data: {
+    stripe_customer_id: string;
+  }
+}
+
+const subscribe = async (request: NextApiRequest, response: NextApiResponse) => {
   if (request.method == 'POST') {
     const session = await getSession({ req: request });
-    const stripeCustomer = await stripe.customers.create({
-      email: session.user.email
-    });
+
+    const userFaunaDb = await fauna.query<userFaunaDb>(
+      q.Get(
+        q.Match(
+          q.Index('user_by_email'),
+          q.Casefold(session.user.email))
+      )
+    );
+
+    let customerId = userFaunaDb.data.stripe_customer_id;
+
+    if (!customerId) {
+      const stripeCustomer = await stripe.customers.create({
+        email: session.user.email
+      });
+
+      await fauna.query(
+        q.Update(
+          q.Ref(q.Collection('users'), userFaunaDb.ref.id),
+          {
+            data:
+              { stripe_customer_id: stripeCustomer.id }
+          }
+        )
+      );
+      customerId = stripeCustomer.id;
+
+    }
 
     const checkoutSession = await stripe.checkout.sessions.create({
-      customer: stripeCustomer.id,
+      customer: customerId,
       payment_method_types: ['card'],
       billing_address_collection: 'required',
       line_items: [
@@ -29,3 +65,5 @@ export default async (request: NextApiRequest, response: NextApiResponse) => {
     response.status(405).end('Method no allowed');
   }
 }
+
+export default subscribe;
